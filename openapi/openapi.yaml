@@ -1,0 +1,595 @@
+openapi: 3.0.3
+info:
+  title: Pulseo API
+  description: |
+    LLM brand visibility monitoring API. Most routes require **both** `X-API-Key` (backend shared secret)
+    and `Authorization: Bearer <access_token>` from Supabase auth. Auth signup/login/refresh do not use `X-API-Key`.
+  version: 1.0.0
+
+servers:
+  - url: http://localhost:3001
+    description: Local
+  - url: https://api.example.com
+    description: Production (replace with your host)
+
+tags:
+  - name: Health
+  - name: Auth
+  - name: Me
+  - name: Dashboard
+  - name: Scans
+  - name: Prompts
+  - name: Competitors
+  - name: Responses
+  - name: Citations
+  - name: Alerts
+
+components:
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  schemas:
+    ErrorBody:
+      type: object
+      properties:
+        error:
+          type: object
+          properties:
+            code:
+              type: string
+            message:
+              type: string
+
+paths:
+  /api/v1/health:
+    get:
+      tags: [Health]
+      summary: Liveness and dependency checks
+      responses:
+        '200':
+          description: OK — all dependencies healthy
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      status:
+                        type: string
+                        enum: [ok, degraded]
+                      redis:
+                        type: string
+                      supabase:
+                        type: string
+                      timestamp:
+                        type: string
+        '503':
+          description: Degraded — one or more checks failed
+
+  /api/v1/auth/signup:
+    post:
+      tags: [Auth]
+      summary: Register user and organization
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password, full_name, brand_name]
+              properties:
+                email:
+                  type: string
+                  format: email
+                password:
+                  type: string
+                  minLength: 8
+                full_name:
+                  type: string
+                brand_name:
+                  type: string
+                brand_domain:
+                  type: string
+                industry:
+                  type: string
+      responses:
+        '201':
+          description: Created
+        '400':
+          description: Validation or auth error
+        '409':
+          description: User already exists
+
+  /api/v1/auth/login:
+    post:
+      tags: [Auth]
+      summary: Sign in
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email:
+                  type: string
+                  format: email
+                password:
+                  type: string
+      responses:
+        '200':
+          description: OK
+        '401':
+          description: Invalid credentials
+
+  /api/v1/auth/logout:
+    post:
+      tags: [Auth]
+      summary: Sign out (optional Bearer token)
+      security: []
+      parameters:
+        - name: Authorization
+          in: header
+          required: false
+          schema:
+            type: string
+      responses:
+        '200':
+          description: OK
+
+  /api/v1/auth/forgot-password:
+    post:
+      tags: [Auth]
+      summary: Request password reset email
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email]
+              properties:
+                email:
+                  type: string
+                  format: email
+      responses:
+        '200':
+          description: Always returns success message (no enumeration)
+
+  /api/v1/auth/refresh:
+    post:
+      tags: [Auth]
+      summary: Refresh session tokens
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [refresh_token]
+              properties:
+                refresh_token:
+                  type: string
+      responses:
+        '200':
+          description: New session
+        '401':
+          description: Invalid refresh token
+
+  /api/v1/me:
+    get:
+      tags: [Me]
+      summary: Current user profile, organization, alert rules
+      security:
+        - ApiKeyAuth: []
+          BearerAuth: []
+      responses:
+        '200':
+          description: OK
+        '401':
+          description: Invalid API key or token
+        '403':
+          description: No organization
+
+  /api/v1/dashboard:
+    get:
+      tags: [Dashboard]
+      summary: Dashboard overview (visibility, prompts, citations, alerts)
+      security:
+        - ApiKeyAuth: []
+          BearerAuth: []
+      parameters:
+        - name: days
+          in: query
+          schema:
+            type: integer
+            default: 30
+      responses:
+        '200':
+          description: OK
+
+  /api/v1/dashboard/visibility:
+    get:
+      tags: [Dashboard]
+      summary: Visibility history for the org
+      security:
+        - ApiKeyAuth: []
+          BearerAuth: []
+      parameters:
+        - name: days
+          in: query
+          schema:
+            type: integer
+            default: 30
+      responses:
+        '200':
+          description: OK
+        '500':
+          description: DB error
+
+  /api/v1/scans:
+    post:
+      tags: [Scans]
+      summary: Start a new scan
+      security:
+        - ApiKeyAuth: []
+          BearerAuth: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                triggered_by:
+                  type: string
+                  enum: [manual, onboarding]
+                  default: manual
+                prompt_ids:
+                  type: array
+                  items:
+                    type: string
+                    format: uuid
+                  nullable: true
+                model_ids:
+                  type: array
+                  items:
+                    type: string
+                  nullable: true
+      responses:
+        '201':
+          description: Scan created and queued
+        '409':
+          description: Scan already running
+
+  /api/v1/scans/{id}:
+    get:
+      tags: [Scans]
+      summary: Scan status and progress
+      security:
+        - ApiKeyAuth: []
+          BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: OK
+        '404':
+          description: Not found
+
+  /api/v1/prompts:
+    get:
+      tags: [Prompts]
+      summary: List prompts with visibility metrics
+      security:
+        - ApiKeyAuth: []
+          BearerAuth: []
+      responses:
+        '200':
+          description: OK
+    post:
+      tags: [Prompts]
+      summary: Create prompt
+      security:
+        - ApiKeyAuth: []
+          BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [text]
+              properties:
+                text:
+                  type: string
+                  minLength: 5
+                  maxLength: 500
+                country:
+                  type: string
+                country_code:
+                  type: string
+                language:
+                  type: string
+      responses:
+        '201':
+          description: Created
+        '403':
+          description: Plan limit
+
+  /api/v1/prompts/{id}:
+    patch:
+      tags: [Prompts]
+      summary: Update prompt
+      security:
+        - ApiKeyAuth: []
+          BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                text:
+                  type: string
+                country:
+                  type: string
+                country_code:
+                  type: string
+                language:
+                  type: string
+                active:
+                  type: boolean
+      responses:
+        '200':
+          description: OK
+        '404':
+          description: Not found
+    delete:
+      tags: [Prompts]
+      summary: Delete prompt
+      security:
+        - ApiKeyAuth: []
+          BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Deleted
+        '404':
+          description: Not found
+
+  /api/v1/competitors:
+    get:
+      tags: [Competitors]
+      summary: List competitors with SOV-style enrichment
+      security:
+        - ApiKeyAuth: []
+          BearerAuth: []
+      responses:
+        '200':
+          description: OK
+    post:
+      tags: [Competitors]
+      summary: Add competitor
+      security:
+        - ApiKeyAuth: []
+          BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name:
+                  type: string
+                domain:
+                  type: string
+      responses:
+        '201':
+          description: Created
+        '403':
+          description: Plan limit
+
+  /api/v1/competitors/{id}:
+    delete:
+      tags: [Competitors]
+      summary: Remove competitor
+      security:
+        - ApiKeyAuth: []
+          BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: OK
+        '404':
+          description: Not found
+
+  /api/v1/responses:
+    get:
+      tags: [Responses]
+      summary: Paginated LLM responses
+      security:
+        - ApiKeyAuth: []
+          BearerAuth: []
+      parameters:
+        - name: page
+          in: query
+          schema:
+            type: integer
+            default: 1
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 20
+        - name: promptId
+          in: query
+          schema:
+            type: string
+            format: uuid
+        - name: model
+          in: query
+          schema:
+            type: string
+      responses:
+        '200':
+          description: OK
+
+  /api/v1/responses/{id}:
+    get:
+      tags: [Responses]
+      summary: Response detail with mentions and citations
+      security:
+        - ApiKeyAuth: []
+          BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: OK
+        '404':
+          description: Not found
+
+  /api/v1/citations:
+    get:
+      tags: [Citations]
+      summary: Paginated citations
+      security:
+        - ApiKeyAuth: []
+          BearerAuth: []
+      parameters:
+        - name: page
+          in: query
+          schema:
+            type: integer
+            default: 1
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 20
+        - name: domain
+          in: query
+          schema:
+            type: string
+      responses:
+        '200':
+          description: OK
+
+  /api/v1/alerts:
+    get:
+      tags: [Alerts]
+      summary: Alert history (latest 50)
+      security:
+        - ApiKeyAuth: []
+          BearerAuth: []
+      parameters:
+        - name: unread
+          in: query
+          schema:
+            type: string
+            enum: ['true', 'false']
+      responses:
+        '200':
+          description: OK
+
+  /api/v1/alerts/{id}/read:
+    patch:
+      tags: [Alerts]
+      summary: Mark alert as read
+      security:
+        - ApiKeyAuth: []
+          BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: OK
+        '404':
+          description: Not found
+
+  /api/v1/alerts/rules:
+    get:
+      tags: [Alerts]
+      summary: List alert rules
+      security:
+        - ApiKeyAuth: []
+          BearerAuth: []
+      responses:
+        '200':
+          description: OK
+
+  /api/v1/alerts/rules/{id}:
+    put:
+      tags: [Alerts]
+      summary: Update alert rule
+      security:
+        - ApiKeyAuth: []
+          BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                enabled:
+                  type: boolean
+                threshold:
+                  type: number
+      responses:
+        '200':
+          description: OK
+        '404':
+          description: Not found

@@ -1,0 +1,239 @@
+// Pulseo `public` tables — columns match prisma/migrations/*_initial/migration.sql (and legacy migrations/001).
+// CHECK constraints and RLS policies live only in SQL migrations, not in this file.
+// FK targets in auth.users are enforced in Postgres; Profile/Organization.userId are plain UUIDs here.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Profile {
+  id        String   @id @db.Uuid
+  fullName  String   @default("") @map("full_name")
+  avatarUrl String?  @map("avatar_url")
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@map("profiles")
+}
+
+model Organization {
+  id                   String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId               String   @unique @map("user_id") @db.Uuid
+  name                 String
+  brandName            String   @map("brand_name")
+  domain               String?
+  industry             String?
+  planTier             String   @default("free") @map("plan_tier")
+  enabledModels        String[] @default(["ChatGPT"]) @map("enabled_models")
+  stripeCustomerId     String?  @map("stripe_customer_id")
+  stripeSubscriptionId String?  @map("stripe_subscription_id")
+  createdAt            DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt            DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  prompts               Prompt[]
+  competitors           Competitor[]
+  scans                 Scan[]
+  responses             Response[]
+  mentions              Mention[]
+  citations             Citation[]
+  visibilityDaily       VisibilityDaily[]
+  promptVisibilityDaily PromptVisibilityDaily[]
+  alertRules            AlertRule[]
+  alertHistory          AlertHistory[]
+
+  @@map("organizations")
+}
+
+model Prompt {
+  id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId       String   @map("org_id") @db.Uuid
+  text        String
+  country     String   @default("United States")
+  countryCode String   @default("US") @map("country_code")
+  language    String   @default("English")
+  active      Boolean  @default(true)
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt   DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  organization          Organization            @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  responses             Response[]
+  citations             Citation[]
+  promptVisibilityDaily PromptVisibilityDaily[]
+
+  @@index([orgId])
+  @@map("prompts")
+}
+
+model Competitor {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId     String   @map("org_id") @db.Uuid
+  name      String
+  domain    String?
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  organization Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+
+  @@index([orgId])
+  @@map("competitors")
+}
+
+model Scan {
+  id             String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId          String    @map("org_id") @db.Uuid
+  status         String    @default("pending")
+  triggeredBy    String    @default("cron") @map("triggered_by")
+  totalTasks     Int       @default(0) @map("total_tasks")
+  completedTasks Int       @default(0) @map("completed_tasks")
+  startedAt      DateTime? @map("started_at") @db.Timestamptz(6)
+  completedAt    DateTime? @map("completed_at") @db.Timestamptz(6)
+  createdAt      DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  organization    Organization      @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  responses       Response[]
+  visibilityDaily VisibilityDaily[]
+
+  @@index([orgId])
+  @@map("scans")
+}
+
+model Response {
+  id              String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  scanId          String   @map("scan_id") @db.Uuid
+  orgId           String   @map("org_id") @db.Uuid
+  promptId        String   @map("prompt_id") @db.Uuid
+  model           String
+  status          String   @default("pending")
+  rawResponse     String?  @map("raw_response")
+  snippet         String?
+  brandMentioned  Boolean  @default(false) @map("brand_mentioned")
+  mentionPosition Int?     @map("mention_position")
+  brandSentiment  String?  @map("brand_sentiment")
+  queriedAt       DateTime @default(now()) @map("queried_at") @db.Timestamptz(6)
+  createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  organization Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  scan         Scan         @relation(fields: [scanId], references: [id], onDelete: Cascade)
+  prompt       Prompt       @relation(fields: [promptId], references: [id], onDelete: Cascade)
+  mentions     Mention[]
+  citations    Citation[]
+
+  @@index([scanId])
+  @@index([orgId, promptId])
+  @@index([model])
+  @@map("responses")
+}
+
+model Mention {
+  id         String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  responseId String   @map("response_id") @db.Uuid
+  orgId      String   @map("org_id") @db.Uuid
+  name       String
+  type       String
+  position   Int?
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  organization Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  response     Response     @relation(fields: [responseId], references: [id], onDelete: Cascade)
+
+  @@index([responseId])
+  @@index([orgId])
+  @@map("mentions")
+}
+
+model Citation {
+  id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  responseId  String   @map("response_id") @db.Uuid
+  orgId       String   @map("org_id") @db.Uuid
+  promptId    String   @map("prompt_id") @db.Uuid
+  url         String
+  domain      String
+  title       String?
+  model       String
+  firstSeenAt DateTime @default(now()) @map("first_seen_at") @db.Timestamptz(6)
+  lastSeenAt  DateTime @default(now()) @map("last_seen_at") @db.Timestamptz(6)
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  organization Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  response     Response     @relation(fields: [responseId], references: [id], onDelete: Cascade)
+  prompt       Prompt       @relation(fields: [promptId], references: [id], onDelete: Cascade)
+
+  @@index([orgId])
+  @@index([domain])
+  @@map("citations")
+}
+
+model VisibilityDaily {
+  id             String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId          String   @map("org_id") @db.Uuid
+  scanId         String?  @map("scan_id") @db.Uuid
+  date           DateTime @db.Date
+  score          Int      @default(0)
+  totalResponses Int      @default(0) @map("total_responses")
+  totalMentions  Int      @default(0) @map("total_mentions")
+  totalCitations Int      @default(0) @map("total_citations")
+  modelScores    Json     @default("{}") @map("model_scores")
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  organization Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  scan         Scan?        @relation(fields: [scanId], references: [id], onDelete: SetNull)
+
+  @@unique([orgId, date])
+  @@index([orgId, date(sort: Desc)])
+  @@map("visibility_daily")
+}
+
+model PromptVisibilityDaily {
+  id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId       String   @map("org_id") @db.Uuid
+  promptId    String   @map("prompt_id") @db.Uuid
+  date        DateTime @db.Date
+  score       Int      @default(0)
+  mentions    Int      @default(0)
+  responses   Int      @default(0)
+  citations   Int      @default(0)
+  avgPosition Decimal? @map("avg_position") @db.Decimal(4, 2)
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  organization Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  prompt       Prompt       @relation(fields: [promptId], references: [id], onDelete: Cascade)
+
+  @@unique([orgId, promptId, date])
+  @@index([orgId, promptId, date(sort: Desc)])
+  @@map("prompt_visibility_daily")
+}
+
+model AlertRule {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId     String   @map("org_id") @db.Uuid
+  type      String
+  enabled   Boolean  @default(true)
+  threshold Int?
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  organization Organization   @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  alertHistory AlertHistory[]
+
+  @@map("alert_rules")
+}
+
+model AlertHistory {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId     String   @map("org_id") @db.Uuid
+  ruleId    String?  @map("rule_id") @db.Uuid
+  type      String
+  message   String
+  read      Boolean  @default(false) @map("read")
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  organization Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  rule         AlertRule?   @relation(fields: [ruleId], references: [id], onDelete: SetNull)
+
+  @@index([orgId, createdAt(sort: Desc)])
+  @@map("alert_history")
+}
