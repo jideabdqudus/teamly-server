@@ -1,0 +1,39 @@
+# Self-host stack for the Teamly backend (API + BullMQ workers) and its Redis
+# queue. Postgres and Auth are provided by your Supabase project — set the
+# SUPABASE_* and DATABASE_URL values in `.env` (copy from `.env.example`).
+#
+#   cp .env.example .env   # then fill in Supabase creds + CREDENTIALS_ENCRYPTION_KEY
+#   docker compose up --build
+#
+# Run migrations once against your Supabase DB before first start:
+#   docker compose run --rm server npx prisma migrate deploy
+
+services:
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  server:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      # Override the localhost default so the API reaches the redis service.
+      REDIS_URL: redis://redis:6379
+      NODE_ENV: production
+    ports:
+      - "${PORT:-3001}:3001"
+    depends_on:
+      redis:
+        condition: service_healthy
+
+volumes:
+  redis-data:
