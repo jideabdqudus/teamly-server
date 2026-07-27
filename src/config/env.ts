@@ -9,22 +9,19 @@ const envSchema = z.object({
   LOG_LEVEL: z
     .enum(["fatal", "error", "warn", "info", "debug", "trace", "silent"])
     .optional(),
+  FRONTEND_URL: z.string().optional(),
   SUPABASE_URL: z.string().min(1, "SUPABASE_URL is required"),
   SUPABASE_SERVICE_ROLE_KEY: z
     .string()
     .min(1, "SUPABASE_SERVICE_ROLE_KEY is required"),
   SUPABASE_JWT_SECRET: z.string().min(1, "SUPABASE_JWT_SECRET is required"),
   REDIS_URL: z.string().default("redis://localhost:6379"),
-  PULSEO_BACKEND_API_KEY: z
+  TEAMLY_BACKEND_API_KEY: z
     .string()
-    .min(1, "PULSEO_BACKEND_API_KEY is required"),
-  OPENAI_API_KEY: z.string().min(1, "OPENAI_API_KEY is required"),
-  // Future providers — optional for now
-  ANTHROPIC_API_KEY: z.string().optional(),
-  GOOGLE_AI_API_KEY: z.string().optional(),
-  PERPLEXITY_API_KEY: z.string().optional(),
-  XAI_API_KEY: z.string().optional(),
-  SERPAPI_API_KEY: z.string().optional(),
+    .min(1, "TEAMLY_BACKEND_API_KEY is required"),
+  CREDENTIALS_ENCRYPTION_KEY: z
+    .string()
+    .min(1, "CREDENTIALS_ENCRYPTION_KEY is required"),
   RESEND_API_KEY: z.string().optional(),
 });
 
