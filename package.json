@@ -1,7 +1,7 @@
 {
-  "name": "pulseo-server",
+  "name": "teamly-server",
   "version": "1.0.0",
-  "description": "Pulseo backend — LLM brand visibility monitoring API",
+  "description": "Teamly backend — LLM brand visibility monitoring API",
   "main": "dist/index.js",
   "scripts": {
     "dev": "tsx watch src/index.ts",
@@ -14,6 +14,8 @@
     "db:studio": "prisma studio"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.115.0",
+    "@google/generative-ai": "^0.24.1",
     "@prisma/client": "^5.22.0",
     "@supabase/supabase-js": "^2.49.4",
     "bullmq": "^5.51.1",
@@ -21,6 +23,7 @@
     "dotenv": "^17.4.2",
     "express": "^4.21.2",
     "express-async-errors": "^3.1.1",
+    "express-rate-limit": "^8.6.1",
     "helmet": "^8.0.0",
     "ioredis": "^5.6.1",
     "openai": "^4.100.0",
