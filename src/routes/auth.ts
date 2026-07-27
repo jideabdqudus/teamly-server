@@ -1,6 +1,6 @@
 import { Router, Request, Response } from "express";
 import { z } from "zod";
-import { supabase } from "../config/supabase";
+import { createSessionClient, supabase } from "../config/supabase";
 import { ApiError } from "../middleware/error-handler";
 
 const router = Router();
@@ -9,9 +9,6 @@ const signupSchema = z.object({
   email: z.string().email(),
   password: z.string().min(8, "Password must be at least 8 characters"),
   full_name: z.string().min(1),
-  brand_name: z.string().min(1),
-  brand_domain: z.string().optional(),
-  industry: z.string().optional(),
 });
 
 const loginSchema = z.object({
@@ -30,10 +27,8 @@ router.post("/signup", async (req: Request, res: Response) => {
     throw new ApiError(400, "VALIDATION_ERROR", body.error.errors[0].message);
   }
 
-  const { email, password, full_name, brand_name, brand_domain, industry } =
-    body.data;
+  const { email, password, full_name } = body.data;
 
-  // 1. Create user via Supabase Auth
   const { data: authData, error: authError } =
     await supabase.auth.admin.createUser({
       email,
@@ -59,35 +54,38 @@ router.post("/signup", async (req: Request, res: Response) => {
 
   const userId = authData.user.id;
 
-  // 2. Create profile
-  await supabase.from("profiles").insert({ id: userId, full_name });
-
-  // 3. Create organization
-  const { data: org, error: orgError } = await supabase
-    .from("organizations")
-    .insert({
-      user_id: userId,
-      name: brand_name,
-      brand_name,
-      domain: brand_domain,
-      industry,
-    })
-    .select()
+  const { data: account, error: accountError } = await supabase
+    .from("accounts")
+    .select("id, name")
+    .eq("user_id", userId)
     .single();
 
-  if (orgError || !org) {
-    // Cleanup: delete the user we just created
+  if (accountError || !account) {
+    req.log.error(
+      {
+        event: "auth.signup.account_missing",
+        user_id: userId,
+        supabase: accountError
+          ? {
+              message: accountError.message,
+              code: accountError.code,
+              details: accountError.details,
+              hint: accountError.hint,
+            }
+          : null,
+      },
+      "account not found after signup (handle_new_user trigger missing?)",
+    );
     await supabase.auth.admin.deleteUser(userId);
     throw new ApiError(
       500,
-      "ORG_CREATE_FAILED",
-      "Failed to create organization",
+      "ACCOUNT_CREATE_FAILED",
+      "Failed to create account",
     );
   }
 
-  // 4. Sign in to get session tokens
   const { data: sessionData, error: sessionError } =
-    await supabase.auth.signInWithPassword({
+    await createSessionClient().auth.signInWithPassword({
       email,
       password,
     });
@@ -101,7 +99,7 @@ router.post("/signup", async (req: Request, res: Response) => {
   }
 
   req.log.info(
-    { event: "auth.signup", user_id: userId, org_id: org.id },
+    { event: "auth.signup", user_id: userId, account_id: account.id },
     "user signed up",
   );
 
@@ -112,12 +110,8 @@ router.post("/signup", async (req: Request, res: Response) => {
         email,
         full_name,
       },
-      org: {
-        id: org.id,
-        name: org.name,
-        brand_name: org.brand_name,
-        plan_tier: org.plan_tier,
-      },
+      account: { id: account.id, name: account.name },
+      brands: [],
       session: {
         access_token: sessionData.session.access_token,
         refresh_token: sessionData.session.refresh_token,
@@ -138,7 +132,7 @@ router.post("/login", async (req: Request, res: Response) => {
 
   const { email, password } = body.data;
 
-  const { data, error } = await supabase.auth.signInWithPassword({
+  const { data, error } = await createSessionClient().auth.signInWithPassword({
     email,
     password,
   });
@@ -147,21 +141,29 @@ router.post("/login", async (req: Request, res: Response) => {
     throw new ApiError(401, "INVALID_CREDENTIALS", "Invalid email or password");
   }
 
-  // Load profile + org
+  // Load profile + account + brands
   const { data: profile } = await supabase
     .from("profiles")
     .select("full_name, avatar_url")
     .eq("id", data.user.id)
     .single();
 
-  const { data: org } = await supabase
-    .from("organizations")
-    .select("id, name, brand_name, plan_tier")
+  const { data: account } = await supabase
+    .from("accounts")
+    .select("id, name")
     .eq("user_id", data.user.id)
     .single();
 
+  const { data: brands } = account
+    ? await supabase
+        .from("brands")
+        .select("*")
+        .eq("account_id", account.id)
+        .order("created_at", { ascending: true })
+    : { data: [] };
+
   req.log.info(
-    { event: "auth.login", user_id: data.user.id, org_id: org?.id },
+    { event: "auth.login", user_id: data.user.id, account_id: account?.id },
     "user logged in",
   );
 
@@ -173,7 +175,8 @@ router.post("/login", async (req: Request, res: Response) => {
         full_name: profile?.full_name ?? "",
         avatar_url: profile?.avatar_url,
       },
-      org: org ?? null,
+      account: account ?? null,
+      brands: brands ?? [],
       session: {
         access_token: data.session.access_token,
         refresh_token: data.session.refresh_token,
@@ -229,7 +232,7 @@ router.post("/refresh", async (req: Request, res: Response) => {
     throw new ApiError(400, "VALIDATION_ERROR", "refresh_token is required");
   }
 
-  const { data, error } = await supabase.auth.refreshSession({
+  const { data, error } = await createSessionClient().auth.refreshSession({
     refresh_token: body.data.refresh_token,
   });
 
