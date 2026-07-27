@@ -1,55 +1,100 @@
-import { Router, Request, Response } from 'express';
-import { z } from 'zod';
-import { supabase } from '../config/supabase';
-import { authenticate } from '../middleware/auth';
-import { ApiError } from '../middleware/error-handler';
-import { canAddPrompt } from '../lib/plan-limits';
+import { Router, Request, Response } from "express";
+import { z } from "zod";
+import { supabase } from "../config/supabase";
+import { authenticate, resolveBrand } from "../middleware/auth";
+import { ApiError } from "../middleware/error-handler";
+import { classifyQueryType } from "../services/analysis/query-classifier";
 
 const router = Router();
-router.use(authenticate);
+router.use(authenticate, resolveBrand);
 
 const createPromptSchema = z.object({
-  text: z.string().min(5, 'Prompt must be at least 5 characters').max(500),
-  country: z.string().default('United States'),
-  country_code: z.string().default('US'),
-  language: z.string().default('English'),
+  text: z.string().min(5, "Prompt must be at least 5 characters").max(500),
+  country: z.string().default("United States"),
+  country_code: z.string().default("US"),
+  language: z.string().default("English"),
+  query_type: z.enum(["brand", "generic", "competitor"]).optional(),
+  tag_ids: z.array(z.string().uuid()).optional(),
 });
 
 const updatePromptSchema = createPromptSchema.partial().extend({
   active: z.boolean().optional(),
 });
 
+async function syncPromptTags(
+  promptId: string,
+  tagIds: string[],
+): Promise<void> {
+  await supabase.from("prompt_tags").delete().eq("prompt_id", promptId);
+  if (tagIds.length > 0) {
+    await supabase
+      .from("prompt_tags")
+      .insert(tagIds.map((tag_id) => ({ prompt_id: promptId, tag_id })));
+  }
+}
+
+async function loadPromptTags(
+  promptId: string,
+): Promise<{ id: string; name: string }[]> {
+  const { data } = await supabase
+    .from("prompt_tags")
+    .select("tags(id, name)")
+    .eq("prompt_id", promptId);
+  return (data ?? [])
+    .map((row) => row.tags as unknown as { id: string; name: string } | null)
+    .filter((t): t is { id: string; name: string } => t !== null);
+}
+
 /**
  * GET /api/v1/prompts
- * List prompts for the org, joined with latest visibility metrics.
+ * List prompts for the brand with latest visibility metrics, query_type, and tags.
  */
-router.get('/', async (req: Request, res: Response) => {
-  const { org_id } = req.user!;
+router.get("/", async (req: Request, res: Response) => {
+  const brand_id = req.brand_id!;
 
   const { data: prompts, error } = await supabase
-    .from('prompts')
-    .select('*')
-    .eq('org_id', org_id)
-    .order('created_at', { ascending: false });
+    .from("prompts")
+    .select("*")
+    .eq("brand_id", brand_id)
+    .order("created_at", { ascending: false });
 
-  if (error) throw new ApiError(500, 'DB_ERROR', 'Failed to fetch prompts');
+  if (error) throw new ApiError(500, "DB_ERROR", "Failed to fetch prompts");
 
-  // Get latest visibility metrics for each prompt
-  const today = new Date().toISOString().split('T')[0];
-  const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+  const today = new Date().toISOString().split("T")[0];
+  const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000)
+    .toISOString()
+    .split("T")[0];
+  const promptIds = (prompts ?? []).map((p) => p.id);
 
-  const { data: visMetrics } = await supabase
-    .from('prompt_visibility_daily')
-    .select('*')
-    .eq('org_id', org_id)
-    .gte('date', thirtyDaysAgo)
-    .lte('date', today);
+  const [visResult, tagResult] = await Promise.all([
+    supabase
+      .from("prompt_visibility_daily")
+      .select("*")
+      .eq("brand_id", brand_id)
+      .gte("date", thirtyDaysAgo)
+      .lte("date", today),
+    promptIds.length > 0
+      ? supabase
+          .from("prompt_tags")
+          .select("prompt_id, tags(id, name)")
+          .in("prompt_id", promptIds)
+      : Promise.resolve({ data: [] as { prompt_id: string; tags: unknown }[] }),
+  ]);
 
-  // Map latest metric per prompt
-  const metricsByPrompt = new Map<string, typeof visMetrics>();
-  visMetrics?.forEach((m) => {
+  // Latest metrics per prompt.
+  const metricsByPrompt = new Map<string, NonNullable<typeof visResult.data>>();
+  visResult.data?.forEach((m) => {
     const existing = metricsByPrompt.get(m.prompt_id) ?? [];
     metricsByPrompt.set(m.prompt_id, [...existing, m]);
+  });
+
+  // Tags per prompt.
+  const tagsByPrompt = new Map<string, { id: string; name: string }[]>();
+  (tagResult.data ?? []).forEach((row) => {
+    const tag = row.tags as unknown as { id: string; name: string } | null;
+    if (!tag) return;
+    const existing = tagsByPrompt.get(row.prompt_id) ?? [];
+    tagsByPrompt.set(row.prompt_id, [...existing, tag]);
   });
 
   const enriched = (prompts ?? []).map((p) => {
@@ -59,6 +104,7 @@ router.get('/', async (req: Request, res: Response) => {
 
     return {
       ...p,
+      tags: tagsByPrompt.get(p.id) ?? [],
       visibility: latest?.score ?? 0,
       visibilityChange: latest && prev ? latest.score - prev.score : null,
       mentions: latest?.mentions ?? 0,
@@ -74,83 +120,116 @@ router.get('/', async (req: Request, res: Response) => {
 
 /**
  * POST /api/v1/prompts
+ * Creates a prompt, auto-classifying its query_type unless overridden.
  */
-router.post('/', async (req: Request, res: Response) => {
-  const { org_id, plan_tier } = req.user!;
+router.post("/", async (req: Request, res: Response) => {
+  const brand_id = req.brand_id!;
 
   const body = createPromptSchema.safeParse(req.body);
   if (!body.success) {
-    throw new ApiError(400, 'VALIDATION_ERROR', body.error.errors[0].message);
+    throw new ApiError(400, "VALIDATION_ERROR", body.error.errors[0].message);
   }
 
-  // Enforce plan limit
-  const { count } = await supabase
-    .from('prompts')
-    .select('*', { count: 'exact', head: true })
-    .eq('org_id', org_id);
+  const { tag_ids, query_type, ...fields } = body.data;
 
-  if (!canAddPrompt(plan_tier, count ?? 0)) {
-    throw new ApiError(403, 'PLAN_LIMIT', `Your ${plan_tier} plan allows a limited number of prompts. Please upgrade to add more.`);
+  let finalType = query_type;
+  if (!finalType) {
+    const [{ data: brand }, { data: competitors }] = await Promise.all([
+      supabase.from("brands").select("brand_name").eq("id", brand_id).single(),
+      supabase.from("competitors").select("name").eq("brand_id", brand_id),
+    ]);
+    finalType = classifyQueryType(
+      fields.text,
+      brand?.brand_name ?? "",
+      (competitors ?? []).map((c) => c.name),
+    );
   }
 
   const { data, error } = await supabase
-    .from('prompts')
-    .insert({ org_id, ...body.data })
+    .from("prompts")
+    .insert({ brand_id, ...fields, query_type: finalType })
     .select()
     .single();
 
-  if (error || !data) throw new ApiError(500, 'DB_ERROR', 'Failed to create prompt');
+  if (error || !data)
+    throw new ApiError(500, "DB_ERROR", "Failed to create prompt");
 
-  req.log.info({ event: 'prompts.created', prompt_id: data.id }, 'prompt created');
+  if (tag_ids && tag_ids.length > 0) await syncPromptTags(data.id, tag_ids);
 
-  res.status(201).json({ data });
+  req.log.info(
+    { event: "prompts.created", prompt_id: data.id, query_type: finalType },
+    "prompt created",
+  );
+
+  res
+    .status(201)
+    .json({ data: { ...data, tags: await loadPromptTags(data.id) } });
 });
 
 /**
  * PATCH /api/v1/prompts/:id
+ * Updates prompt fields (incl. query_type) and/or its tag set.
  */
-router.patch('/:id', async (req: Request, res: Response) => {
-  const { org_id } = req.user!;
-  const { id } = req.params;
+router.patch("/:id", async (req: Request, res: Response) => {
+  const brand_id = req.brand_id!;
+  const id = String(req.params.id);
 
   const body = updatePromptSchema.safeParse(req.body);
   if (!body.success) {
-    throw new ApiError(400, 'VALIDATION_ERROR', body.error.errors[0].message);
+    throw new ApiError(400, "VALIDATION_ERROR", body.error.errors[0].message);
   }
 
-  const { data, error } = await supabase
-    .from('prompts')
-    .update({ ...body.data, updated_at: new Date().toISOString() })
-    .eq('id', id)
-    .eq('org_id', org_id)
-    .select()
-    .single();
+  const { tag_ids, ...fields } = body.data;
 
-  if (error || !data) throw new ApiError(404, 'NOT_FOUND', 'Prompt not found');
+  let prompt;
+  if (Object.keys(fields).length > 0) {
+    const { data, error } = await supabase
+      .from("prompts")
+      .update({ ...fields, updated_at: new Date().toISOString() })
+      .eq("id", id)
+      .eq("brand_id", brand_id)
+      .select()
+      .single();
+    if (error || !data)
+      throw new ApiError(404, "NOT_FOUND", "Prompt not found");
+    prompt = data;
+  } else {
+    const { data, error } = await supabase
+      .from("prompts")
+      .select("*")
+      .eq("id", id)
+      .eq("brand_id", brand_id)
+      .single();
+    if (error || !data)
+      throw new ApiError(404, "NOT_FOUND", "Prompt not found");
+    prompt = data;
+  }
 
-  req.log.info({ event: 'prompts.updated', prompt_id: data.id }, 'prompt updated');
+  if (tag_ids !== undefined) await syncPromptTags(id, tag_ids);
 
-  res.json({ data });
+  req.log.info({ event: "prompts.updated", prompt_id: id }, "prompt updated");
+
+  res.json({ data: { ...prompt, tags: await loadPromptTags(id) } });
 });
 
 /**
  * DELETE /api/v1/prompts/:id
  */
-router.delete('/:id', async (req: Request, res: Response) => {
-  const { org_id } = req.user!;
-  const { id } = req.params;
+router.delete("/:id", async (req: Request, res: Response) => {
+  const brand_id = req.brand_id!;
+  const id = String(req.params.id);
 
   const { error } = await supabase
-    .from('prompts')
+    .from("prompts")
     .delete()
-    .eq('id', id)
-    .eq('org_id', org_id);
+    .eq("id", id)
+    .eq("brand_id", brand_id);
 
-  if (error) throw new ApiError(404, 'NOT_FOUND', 'Prompt not found');
+  if (error) throw new ApiError(404, "NOT_FOUND", "Prompt not found");
 
-  req.log.info({ event: 'prompts.deleted', prompt_id: id }, 'prompt deleted');
+  req.log.info({ event: "prompts.deleted", prompt_id: id }, "prompt deleted");
 
-  res.json({ data: { message: 'Prompt deleted' } });
+  res.json({ data: { message: "Prompt deleted" } });
 });
 
 export default router;
