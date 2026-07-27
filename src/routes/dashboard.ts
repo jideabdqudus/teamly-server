@@ -1,17 +1,18 @@
 import { Router, Request, Response } from "express";
 import { supabase } from "../config/supabase";
-import { authenticate } from "../middleware/auth";
+import { authenticate, resolveBrand } from "../middleware/auth";
 import { ApiError } from "../middleware/error-handler";
+import { computeDelta } from "../lib/trend";
 
 const router = Router();
-router.use(authenticate);
+router.use(authenticate, resolveBrand);
 
 /**
  * GET /api/v1/dashboard
  * Returns composite dashboard data for the overview page.
  */
 router.get("/", async (req: Request, res: Response) => {
-  const { org_id } = req.user!;
+  const brand_id = req.brand_id!;
   const days = Number(req.query.days ?? 30);
   const fromDate = new Date(Date.now() - days * 24 * 60 * 60 * 1000)
     .toISOString()
@@ -28,7 +29,7 @@ router.get("/", async (req: Request, res: Response) => {
     supabase
       .from("visibility_daily")
       .select("*")
-      .eq("org_id", org_id)
+      .eq("brand_id", brand_id)
       .gte("date", fromDate)
       .order("date", { ascending: true }),
 
@@ -36,7 +37,7 @@ router.get("/", async (req: Request, res: Response) => {
     supabase
       .from("prompts")
       .select("id, text, active")
-      .eq("org_id", org_id)
+      .eq("brand_id", brand_id)
       .eq("active", true)
       .limit(5),
 
@@ -44,7 +45,7 @@ router.get("/", async (req: Request, res: Response) => {
     supabase
       .from("citations")
       .select("id, url, domain, title, model, first_seen_at, last_seen_at")
-      .eq("org_id", org_id)
+      .eq("brand_id", brand_id)
       .order("last_seen_at", { ascending: false })
       .limit(5),
 
@@ -52,7 +53,7 @@ router.get("/", async (req: Request, res: Response) => {
     supabase
       .from("alert_history")
       .select("*")
-      .eq("org_id", org_id)
+      .eq("brand_id", brand_id)
       .eq("read", false)
       .order("created_at", { ascending: false })
       .limit(10),
@@ -61,22 +62,44 @@ router.get("/", async (req: Request, res: Response) => {
     supabase
       .from("prompt_visibility_daily")
       .select("prompt_id, score, date")
-      .eq("org_id", org_id)
+      .eq("brand_id", brand_id)
       .gte("date", fromDate)
       .order("date", { ascending: false }),
   ]);
 
   const visibility = visibilityResult.data ?? [];
   const latest = visibility[visibility.length - 1];
-  const prev = visibility[visibility.length - 2];
 
-  const visibilityScore = latest?.score ?? 0;
-  const visibilityChange = latest && prev ? latest.score - prev.score : null;
+  // Build one daily series per headline KPI, then a period-over-period delta.
+  // computeDelta drops null points, so no pre-filtering here.
+  const series = (map: (v: (typeof visibility)[number]) => number | null) =>
+    visibility.map((v) => ({ date: v.date as string, value: map(v) }));
 
-  // Build per-model breakdown from latest score
+  const metrics = {
+    visibility_score: computeDelta(series((v) => v.score ?? 0)),
+    mention_rate: computeDelta(
+      series((v) =>
+        v.total_responses > 0
+          ? Math.round((v.total_mentions / v.total_responses) * 100)
+          : 0,
+      ),
+    ),
+    brand_sov: computeDelta(series((v) => v.brand_sov ?? 0)),
+    // Position is only meaningful when the brand was mentioned — skip null days.
+    avg_position: computeDelta(
+      series((v) => (v.avg_position != null ? Number(v.avg_position) : null)),
+    ),
+    total_citations: computeDelta(series((v) => v.total_citations ?? 0)),
+    // Sentiment is null on days with no brand mentions — skip those.
+    sentiment: computeDelta(
+      series((v) => (v.sentiment_score != null ? v.sentiment_score : null)),
+    ),
+  };
+
+  // Per-model breakdown from the latest snapshot.
   const modelBreakdown = latest?.model_scores ?? {};
 
-  // Top prompts with their latest scores
+  // Top prompts with their latest scores.
   const promptScoreMap = new Map<string, number>();
   (promptVisResult.data ?? []).forEach((pv) => {
     if (!promptScoreMap.has(pv.prompt_id)) {
@@ -92,12 +115,8 @@ router.get("/", async (req: Request, res: Response) => {
 
   res.json({
     data: {
-      visibility: {
-        score: visibilityScore,
-        change: visibilityChange,
-        trend: visibility.map((v) => ({ date: v.date, score: v.score })),
-        model_breakdown: modelBreakdown,
-      },
+      metrics,
+      model_breakdown: modelBreakdown,
       top_prompts: topPrompts,
       recent_citations: citationsResult.data ?? [],
       alerts: alertsResult.data ?? [],
@@ -110,7 +129,7 @@ router.get("/", async (req: Request, res: Response) => {
  * Visibility history with configurable window.
  */
 router.get("/visibility", async (req: Request, res: Response) => {
-  const { org_id } = req.user!;
+  const brand_id = req.brand_id!;
   const days = Number(req.query.days ?? 30);
   const fromDate = new Date(Date.now() - days * 24 * 60 * 60 * 1000)
     .toISOString()
@@ -119,7 +138,7 @@ router.get("/visibility", async (req: Request, res: Response) => {
   const { data, error } = await supabase
     .from("visibility_daily")
     .select("*")
-    .eq("org_id", org_id)
+    .eq("brand_id", brand_id)
     .gte("date", fromDate)
     .order("date", { ascending: true });
 
