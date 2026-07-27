@@ -14,7 +14,7 @@ export function createAnalysisWorker(): Worker {
   return new Worker<AnalysisJob>(
     'analysis',
     async (job: Job<AnalysisJob>) => {
-      const { response_id, org_id, brand_name, api_citations } = job.data;
+      const { response_id, brand_id, brand_name, api_citations } = job.data;
 
       // Load the response from DB
       const { data: response } = await supabase
@@ -28,11 +28,11 @@ export function createAnalysisWorker(): Worker {
         return;
       }
 
-      // Load competitor names for this org
+      // Load competitor names for this brand
       const { data: competitors } = await supabase
         .from('competitors')
         .select('name')
-        .eq('org_id', org_id);
+        .eq('brand_id', brand_id);
 
       const competitorNames = (competitors ?? []).map((c) => c.name);
       const rawText = response.raw_response;
@@ -44,7 +44,7 @@ export function createAnalysisWorker(): Worker {
         await supabase.from('mentions').insert(
           mentions.map((m) => ({
             response_id,
-            org_id,
+            brand_id,
             name: m.name,
             type: m.type,
             position: m.position,
@@ -52,7 +52,7 @@ export function createAnalysisWorker(): Worker {
         );
       }
 
-      // 2. Analyse sentiment
+      // 2. Analyse sentiment (0–100 score + coarse label)
       const sentiment = analyzeSentiment(rawText, brand_name);
       const brandMentioned = mentions.some((m) => m.type === 'brand');
 
@@ -64,7 +64,8 @@ export function createAnalysisWorker(): Worker {
         .from('responses')
         .update({
           brand_mentioned: brandMentioned,
-          brand_sentiment: brandMentioned ? sentiment : null,
+          brand_sentiment: brandMentioned ? sentiment.label : null,
+          brand_sentiment_score: brandMentioned ? sentiment.score : null,
           mention_position: position,
         })
         .eq('id', response_id);
@@ -73,11 +74,11 @@ export function createAnalysisWorker(): Worker {
       const citations = extractCitations(rawText, api_citations);
       if (citations.length > 0) {
         for (const citation of citations) {
-          // Upsert: update last_seen_at if URL already exists for this org
+          // Upsert: update last_seen_at if URL already exists for this brand
           const { data: existing } = await supabase
             .from('citations')
             .select('id')
-            .eq('org_id', org_id)
+            .eq('brand_id', brand_id)
             .eq('url', citation.url)
             .single();
 
@@ -89,7 +90,7 @@ export function createAnalysisWorker(): Worker {
           } else {
             await supabase.from('citations').insert({
               response_id,
-              org_id,
+              brand_id,
               prompt_id: response.prompt_id,
               url: citation.url,
               domain: citation.domain,
@@ -104,9 +105,10 @@ export function createAnalysisWorker(): Worker {
       log.info(
         {
           response_id,
-          org_id,
+          brand_id,
           brand_mentioned: brandMentioned,
-          sentiment,
+          sentiment: sentiment.label,
+          sentiment_score: sentiment.score,
           citation_count: citations.length,
         },
         'analysis complete',

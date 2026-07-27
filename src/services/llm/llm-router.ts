@@ -1,31 +1,91 @@
-import { ModelName, LLMResponse, LLMProvider } from '../../types';
-import { queryChatGPT } from './openai';
+import { ModelName, LLMResponse } from "../../types";
+import { supabase } from "../../config/supabase";
+import { ProviderImpl } from "./openai-compat";
+import { chatgptProvider } from "./openai";
+import { claudeProvider } from "./anthropic";
+import { geminiProvider } from "./google";
+import { grokProvider } from "./xai";
+import { perplexityProvider } from "./perplexity";
 
-// ─── Provider Registry ───────────────────────────────────────────────────────
-// To add a new provider:
-//   1. Create a new file in services/llm/ (e.g., anthropic.ts)
-//   2. Implement the LLMProvider signature: (prompt: string) => Promise<LLMResponse>
-//   3. Import it and add an entry to PROVIDERS below
-// ─────────────────────────────────────────────────────────────────────────────
+export type ProviderId =
+  | "openai"
+  | "anthropic"
+  | "google"
+  | "xai"
+  | "perplexity";
 
-const PROVIDERS: Partial<Record<ModelName, LLMProvider>> = {
-  'ChatGPT': queryChatGPT,
-  // 'Claude':          queryClaude,     // from ./anthropic
-  // 'Gemini':          queryGemini,     // from ./google
-  // 'Perplexity':      queryPerplexity, // from ./perplexity
-  // 'Grok':            queryGrok,       // from ./xai
-  // 'AI Overviews':    queryAIOverviews,    // from ./serpapi
-  // 'Google AI Mode':  queryGoogleAIMode,   // from ./serpapi
+export const PROVIDER_IDS: ProviderId[] = [
+  "openai",
+  "anthropic",
+  "google",
+  "xai",
+  "perplexity",
+];
+
+const PROVIDERS: Record<ProviderId, ProviderImpl> = {
+  openai: chatgptProvider,
+  anthropic: claudeProvider,
+  google: geminiProvider,
+  xai: grokProvider,
+  perplexity: perplexityProvider,
 };
 
-export async function queryLLM(model: ModelName, prompt: string): Promise<LLMResponse> {
-  const provider = PROVIDERS[model];
-  if (!provider) {
-    throw new Error(`LLM provider not configured for model: ${model}`);
-  }
-  return provider(prompt);
+const MODEL_PROVIDER: Partial<Record<ModelName, ProviderId>> = {
+  ChatGPT: "openai",
+  Claude: "anthropic",
+  Gemini: "google",
+  Grok: "xai",
+  Perplexity: "perplexity",
+};
+
+export function isProviderId(value: string): value is ProviderId {
+  return (PROVIDER_IDS as string[]).includes(value);
 }
 
-export function getSupportedModels(): ModelName[] {
-  return Object.keys(PROVIDERS) as ModelName[];
+export function getProviderForModel(model: ModelName): ProviderId | null {
+  return MODEL_PROVIDER[model] ?? null;
+}
+
+export function getModelForProvider(provider: ProviderId): ModelName | null {
+  const entry = (
+    Object.entries(MODEL_PROVIDER) as [ModelName, ProviderId][]
+  ).find(([, p]) => p === provider);
+  return entry ? entry[0] : null;
+}
+
+export async function loadKeyedProviders(
+  accountId: string,
+): Promise<Set<ProviderId>> {
+  const { data } = await supabase
+    .from("provider_keys")
+    .select("provider")
+    .eq("account_id", accountId);
+  return new Set((data ?? []).map((k) => k.provider as ProviderId));
+}
+
+export function isModelRunnable(
+  model: ModelName,
+  keyedProviders: Set<ProviderId>,
+): boolean {
+  const provider = getProviderForModel(model);
+  return provider !== null && keyedProviders.has(provider);
+}
+
+export async function queryLLM(
+  model: ModelName,
+  prompt: string,
+  apiKey: string,
+): Promise<LLMResponse> {
+  const provider = MODEL_PROVIDER[model];
+  if (!provider) {
+    throw new Error(`No provider configured for model: ${model}`);
+  }
+  return PROVIDERS[provider].query(prompt, apiKey);
+}
+
+export async function validateProviderKey(
+  provider: ProviderId,
+  apiKey: string,
+): Promise<void> {
+  await PROVIDERS[provider].validate(apiKey);
 }
