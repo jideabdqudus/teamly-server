@@ -1,10 +1,15 @@
 openapi: 3.0.3
 info:
-  title: Pulseo API
+  title: Teamly API
   description: |
     LLM brand visibility monitoring API. Most routes require **both** `X-API-Key` (backend shared secret)
     and `Authorization: Bearer <access_token>` from Supabase auth. Auth signup/login/refresh do not use `X-API-Key`.
-  version: 1.0.0
+
+    An **account** (one per user) owns many **brands** (a tracked company). All brand-scoped routes —
+    dashboard, prompts, competitors, responses, citations, scans, alerts — additionally require an
+    **`X-Brand-Id`** header identifying which brand the request targets; it must belong to the caller's account.
+    Account-scoped routes (`/me`, `/brands`) ignore it.
+  version: 2.0.0
 
 servers:
   - url: http://localhost:3001
@@ -16,12 +21,17 @@ tags:
   - name: Health
   - name: Auth
   - name: Me
+  - name: Brands
+  - name: Provider Keys
   - name: Dashboard
   - name: Scans
   - name: Prompts
+  - name: Suggestions
+  - name: Tags
   - name: Competitors
   - name: Responses
   - name: Citations
+  - name: Sentiment
   - name: Alerts
 
 components:
@@ -35,6 +45,16 @@ components:
       scheme: bearer
       bearerFormat: JWT
 
+  parameters:
+    BrandIdHeader:
+      name: X-Brand-Id
+      in: header
+      required: true
+      description: The brand this request targets. Must belong to the caller's account.
+      schema:
+        type: string
+        format: uuid
+
   schemas:
     ErrorBody:
       type: object
@@ -47,13 +67,164 @@ components:
             message:
               type: string
 
+    MetricDelta:
+      type: object
+      description: A KPI value with its period-over-period delta and daily series.
+      properties:
+        value:
+          type: number
+          description: Latest value in the series (0 if none).
+        change:
+          type: number
+          nullable: true
+          description: latest − previous; null with fewer than 2 points.
+        change_pct:
+          type: integer
+          nullable: true
+          description: Percentage change vs the previous point; null when there is no baseline.
+        trend:
+          type: array
+          items:
+            type: object
+            properties:
+              date:
+                type: string
+                format: date
+              value:
+                type: number
+
+    DashboardData:
+      type: object
+      description: Composite overview payload. Each headline KPI carries its own delta + trend.
+      properties:
+        metrics:
+          type: object
+          properties:
+            visibility_score: { $ref: "#/components/schemas/MetricDelta" }
+            mention_rate: { $ref: "#/components/schemas/MetricDelta" }
+            brand_sov: { $ref: "#/components/schemas/MetricDelta" }
+            avg_position: { $ref: "#/components/schemas/MetricDelta" }
+            total_citations: { $ref: "#/components/schemas/MetricDelta" }
+            sentiment: { $ref: "#/components/schemas/MetricDelta" }
+        model_breakdown:
+          type: object
+          additionalProperties:
+            type: number
+          description: Latest per-model visibility scores.
+        top_prompts:
+          type: array
+          items:
+            type: object
+            properties:
+              id: { type: string, format: uuid }
+              text: { type: string }
+              score: { type: number }
+        recent_citations:
+          type: array
+          items:
+            type: object
+        alerts:
+          type: array
+          items:
+            type: object
+
+    Competitor:
+      type: object
+      description: A tracked competitor enriched with SOV, position, and day-over-day change.
+      properties:
+        id: { type: string, format: uuid }
+        brand_id: { type: string, format: uuid }
+        name: { type: string }
+        domain: { type: string, nullable: true }
+        created_at: { type: string, format: date-time }
+        mentions: { type: integer }
+        shareOfVoice: { type: integer, description: 0–100 }
+        sovChange:
+          type: integer
+          nullable: true
+          description: SOV points vs the previous daily snapshot; null until two snapshots exist.
+        overtookBrand: { type: boolean }
+        avgPosition:
+          type: integer
+          nullable: true
+        positionChange:
+          type: number
+          nullable: true
+          description: Change in avg position vs the previous snapshot (lower is better).
+
+    SentimentData:
+      type: object
+      description: Brand sentiment — daily aggregate, per-model averages, distribution, and negatives.
+      properties:
+        score:
+          type: number
+          description: Latest daily aggregate, 0–100 (50 = neutral).
+        change:
+          type: number
+          nullable: true
+        change_pct:
+          type: integer
+          nullable: true
+        trend:
+          type: array
+          items:
+            type: object
+            properties:
+              date: { type: string, format: date }
+              value: { type: number }
+        by_model:
+          type: object
+          additionalProperties: { type: integer }
+          description: Average sentiment score per model over the window.
+        distribution:
+          type: object
+          properties:
+            positive: { type: integer }
+            neutral: { type: integer }
+            negative: { type: integer }
+        recent_negative:
+          type: array
+          description: Most-negative responses first (score ≤ 40).
+          items:
+            type: object
+            properties:
+              response_id: { type: string, format: uuid }
+              model: { type: string }
+              score: { type: integer, nullable: true }
+              snippet: { type: string }
+              prompt_text: { type: string }
+
+    Tag:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        created_at: { type: string, format: date-time }
+        prompt_count: { type: integer }
+
+    PromptSuggestion:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        text: { type: string }
+        query_type:
+          type: string
+          enum: [brand, generic, competitor]
+        source:
+          type: string
+          enum: [llm, template, keyword_api]
+        status:
+          type: string
+          enum: [suggested, added, dismissed]
+        created_at: { type: string, format: date-time }
+
 paths:
   /api/v1/health:
     get:
       tags: [Health]
       summary: Liveness and dependency checks
       responses:
-        '200':
+        "200":
           description: OK — all dependencies healthy
           content:
             application/json:
@@ -72,20 +243,20 @@ paths:
                         type: string
                       timestamp:
                         type: string
-        '503':
+        "503":
           description: Degraded — one or more checks failed
 
   /api/v1/auth/signup:
     post:
       tags: [Auth]
-      summary: Register user and organization
+      summary: Register a user (a profile + empty account are created by a DB trigger; the first brand is created in onboarding)
       requestBody:
         required: true
         content:
           application/json:
             schema:
               type: object
-              required: [email, password, full_name, brand_name]
+              required: [email, password, full_name]
               properties:
                 email:
                   type: string
@@ -95,19 +266,13 @@ paths:
                   minLength: 8
                 full_name:
                   type: string
-                brand_name:
-                  type: string
-                brand_domain:
-                  type: string
-                industry:
-                  type: string
       responses:
-        '201':
-          description: Created
-        '400':
+        "201":
+          description: Created — returns user, account, empty brands array, and session
+        "400":
           description: Validation or auth error
-        '409':
-          description: User already exists
+        "409":
+          description: A user with this email already exists
 
   /api/v1/auth/login:
     post:
@@ -127,9 +292,9 @@ paths:
                 password:
                   type: string
       responses:
-        '200':
+        "200":
           description: OK
-        '401':
+        "401":
           description: Invalid credentials
 
   /api/v1/auth/logout:
@@ -144,7 +309,7 @@ paths:
           schema:
             type: string
       responses:
-        '200':
+        "200":
           description: OK
 
   /api/v1/auth/forgot-password:
@@ -163,7 +328,7 @@ paths:
                   type: string
                   format: email
       responses:
-        '200':
+        "200":
           description: Always returns success message (no enumeration)
 
   /api/v1/auth/refresh:
@@ -181,60 +346,232 @@ paths:
                 refresh_token:
                   type: string
       responses:
-        '200':
+        "200":
           description: New session
-        '401':
+        "401":
           description: Invalid refresh token
 
   /api/v1/me:
     get:
       tags: [Me]
-      summary: Current user profile, organization, alert rules
+      summary: Current user profile, account, and the account's brands
       security:
         - ApiKeyAuth: []
           BearerAuth: []
       responses:
-        '200':
-          description: OK
-        '401':
+        "200":
+          description: "OK — { user, account, brands }"
+        "401":
           description: Invalid API key or token
-        '403':
-          description: No organization
+        "403":
+          description: No account
+
+  /api/v1/me/account:
+    patch:
+      tags: [Me]
+      summary: Update account settings (name and/or enabled_models)
+      description: >
+        `enabled_models` is account-level and shared across brands. A model may
+        only be enabled if the account has a validated key for its provider
+        (else 400 MODEL_WITHOUT_KEY).
+      security:
+        - ApiKeyAuth: []
+          BearerAuth: []
+      responses:
+        "200":
+          description: Updated
+        "400":
+          description: A model was enabled without a provider key
+
+  /api/v1/provider-keys:
+    get:
+      tags: [Provider Keys]
+      summary: Masked list of the account's configured provider keys
+      description: BYOK — keys are stored AES-256-GCM encrypted; only masked forms are ever returned.
+      security:
+        - ApiKeyAuth: []
+          BearerAuth: []
+      responses:
+        "200":
+          description: "OK — [{ provider, masked, last_validated_at }]"
+
+  /api/v1/provider-keys/{provider}:
+    put:
+      tags: [Provider Keys]
+      summary: Validate and store a provider key (upsert)
+      security:
+        - ApiKeyAuth: []
+          BearerAuth: []
+      parameters:
+        - name: provider
+          in: path
+          required: true
+          schema:
+            type: string
+            enum: [openai, anthropic, google, xai, perplexity]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [key]
+              properties:
+                key:
+                  type: string
+      responses:
+        "200":
+          description: "Validated + stored — { provider, masked, valid: true }"
+        "400":
+          description: Invalid key or unknown provider
+    delete:
+      tags: [Provider Keys]
+      summary: Remove a provider key (disables its models)
+      security:
+        - ApiKeyAuth: []
+          BearerAuth: []
+      parameters:
+        - name: provider
+          in: path
+          required: true
+          schema:
+            type: string
+            enum: [openai, anthropic, google, xai, perplexity]
+      responses:
+        "200":
+          description: Removed
+
+  /api/v1/brands:
+    get:
+      tags: [Brands]
+      summary: List the account's brands
+      security:
+        - ApiKeyAuth: []
+          BearerAuth: []
+      responses:
+        "200":
+          description: OK
+    post:
+      tags: [Brands]
+      summary: Create a brand under the account
+      security:
+        - ApiKeyAuth: []
+          BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [brand_name]
+              properties:
+                brand_name:
+                  type: string
+                domain:
+                  type: string
+                industry:
+                  type: string
+                enabled_models:
+                  type: array
+                  items:
+                    type: string
+      responses:
+        "201":
+          description: Created
+        "400":
+          description: Validation error
+
+  /api/v1/brands/{id}:
+    patch:
+      tags: [Brands]
+      summary: Update a brand (brand_name / domain / industry / enabled_models)
+      security:
+        - ApiKeyAuth: []
+          BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Updated
+        "404":
+          description: Brand not found
+    delete:
+      tags: [Brands]
+      summary: Delete a brand (refuses the account's last brand)
+      security:
+        - ApiKeyAuth: []
+          BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Deleted
+        "400":
+          description: Cannot delete the last brand
+        "404":
+          description: Brand not found
 
   /api/v1/dashboard:
     get:
       tags: [Dashboard]
-      summary: Dashboard overview (visibility, prompts, citations, alerts)
+      summary: Dashboard overview — per-KPI deltas & trends, model breakdown, top prompts, citations, alerts
       security:
         - ApiKeyAuth: []
           BearerAuth: []
       parameters:
+        - $ref: "#/components/parameters/BrandIdHeader"
         - name: days
           in: query
           schema:
             type: integer
             default: 30
       responses:
-        '200':
+        "200":
           description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: "#/components/schemas/DashboardData"
 
   /api/v1/dashboard/visibility:
     get:
       tags: [Dashboard]
-      summary: Visibility history for the org
+      summary: Raw visibility_daily history for the brand
       security:
         - ApiKeyAuth: []
           BearerAuth: []
       parameters:
+        - $ref: "#/components/parameters/BrandIdHeader"
         - name: days
           in: query
           schema:
             type: integer
             default: 30
       responses:
-        '200':
+        "200":
           description: OK
-        '500':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      type: object
+                      description: A visibility_daily row (score, totals, brand_sov, avg_position, sentiment_score, model_scores).
+        "500":
           description: DB error
 
   /api/v1/scans:
@@ -266,9 +603,9 @@ paths:
                     type: string
                   nullable: true
       responses:
-        '201':
+        "201":
           description: Scan created and queued
-        '409':
+        "409":
           description: Scan already running
 
   /api/v1/scans/{id}:
@@ -286,9 +623,95 @@ paths:
             type: string
             format: uuid
       responses:
-        '200':
+        "200":
           description: OK
-        '404':
+        "404":
+          description: Not found
+
+  /api/v1/prompts/suggestions:
+    get:
+      tags: [Suggestions]
+      summary: List prompt suggestions
+      security:
+        - ApiKeyAuth: []
+          BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/BrandIdHeader"
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [suggested, added, dismissed]
+            default: suggested
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: "#/components/schemas/PromptSuggestion" }
+
+  /api/v1/prompts/suggestions/generate:
+    post:
+      tags: [Suggestions]
+      summary: Generate suggestions (LLM via the account's key; template fallback)
+      security:
+        - ApiKeyAuth: []
+          BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/BrandIdHeader"
+      responses:
+        "200":
+          description: The current suggested set
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: "#/components/schemas/PromptSuggestion" }
+
+  /api/v1/prompts/suggestions/{id}/add:
+    post:
+      tags: [Suggestions]
+      summary: Add a suggestion as a tracked prompt (marks it added)
+      security:
+        - ApiKeyAuth: []
+          BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/BrandIdHeader"
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "201":
+          description: Created
+        "404":
+          description: Not found
+
+  /api/v1/prompts/suggestions/{id}/dismiss:
+    post:
+      tags: [Suggestions]
+      summary: Dismiss a suggestion (won't resurface on regenerate)
+      security:
+        - ApiKeyAuth: []
+          BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/BrandIdHeader"
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: Dismissed
+        "404":
           description: Not found
 
   /api/v1/prompts:
@@ -299,14 +722,16 @@ paths:
         - ApiKeyAuth: []
           BearerAuth: []
       responses:
-        '200':
+        "200":
           description: OK
     post:
       tags: [Prompts]
-      summary: Create prompt
+      summary: Create prompt (query_type auto-classified unless supplied)
       security:
         - ApiKeyAuth: []
           BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/BrandIdHeader"
       requestBody:
         required: true
         content:
@@ -325,11 +750,16 @@ paths:
                   type: string
                 language:
                   type: string
+                query_type:
+                  type: string
+                  enum: [brand, generic, competitor]
+                  description: Overrides the auto-classification when supplied.
+                tag_ids:
+                  type: array
+                  items: { type: string, format: uuid }
       responses:
-        '201':
+        "201":
           description: Created
-        '403':
-          description: Plan limit
 
   /api/v1/prompts/{id}:
     patch:
@@ -361,10 +791,17 @@ paths:
                   type: string
                 active:
                   type: boolean
+                query_type:
+                  type: string
+                  enum: [brand, generic, competitor]
+                tag_ids:
+                  type: array
+                  items: { type: string, format: uuid }
+                  description: Replaces the prompt's tag set.
       responses:
-        '200':
+        "200":
           description: OK
-        '404':
+        "404":
           description: Not found
     delete:
       tags: [Prompts]
@@ -380,21 +817,94 @@ paths:
             type: string
             format: uuid
       responses:
-        '200':
+        "200":
           description: Deleted
-        '404':
+        "404":
+          description: Not found
+
+  /api/v1/tags:
+    get:
+      tags: [Tags]
+      summary: List brand tags with prompt counts
+      security:
+        - ApiKeyAuth: []
+          BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/BrandIdHeader"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: "#/components/schemas/Tag" }
+    post:
+      tags: [Tags]
+      summary: Create a tag (idempotent per brand)
+      security:
+        - ApiKeyAuth: []
+          BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/BrandIdHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string, minLength: 1, maxLength: 40 }
+      responses:
+        "201":
+          description: Created
+
+  /api/v1/tags/{id}:
+    delete:
+      tags: [Tags]
+      summary: Delete a tag (unlinks it from every prompt)
+      security:
+        - ApiKeyAuth: []
+          BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/BrandIdHeader"
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Deleted
+        "404":
           description: Not found
 
   /api/v1/competitors:
     get:
       tags: [Competitors]
-      summary: List competitors with SOV-style enrichment
+      summary: List competitors with SOV, position, and day-over-day change
       security:
         - ApiKeyAuth: []
           BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/BrandIdHeader"
       responses:
-        '200':
+        "200":
           description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Competitor"
     post:
       tags: [Competitors]
       summary: Add competitor
@@ -414,10 +924,8 @@ paths:
                 domain:
                   type: string
       responses:
-        '201':
+        "201":
           description: Created
-        '403':
-          description: Plan limit
 
   /api/v1/competitors/{id}:
     delete:
@@ -434,9 +942,9 @@ paths:
             type: string
             format: uuid
       responses:
-        '200':
+        "200":
           description: OK
-        '404':
+        "404":
           description: Not found
 
   /api/v1/responses:
@@ -467,7 +975,7 @@ paths:
           schema:
             type: string
       responses:
-        '200':
+        "200":
           description: OK
 
   /api/v1/responses/{id}:
@@ -485,9 +993,9 @@ paths:
             type: string
             format: uuid
       responses:
-        '200':
+        "200":
           description: OK
-        '404':
+        "404":
           description: Not found
 
   /api/v1/citations:
@@ -513,8 +1021,33 @@ paths:
           schema:
             type: string
       responses:
-        '200':
+        "200":
           description: OK
+
+  /api/v1/sentiment:
+    get:
+      tags: [Sentiment]
+      summary: Brand sentiment — aggregate, trend, per-model, distribution, and negatives
+      security:
+        - ApiKeyAuth: []
+          BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/BrandIdHeader"
+        - name: days
+          in: query
+          schema:
+            type: integer
+            default: 30
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: "#/components/schemas/SentimentData"
 
   /api/v1/alerts:
     get:
@@ -528,9 +1061,9 @@ paths:
           in: query
           schema:
             type: string
-            enum: ['true', 'false']
+            enum: ["true", "false"]
       responses:
-        '200':
+        "200":
           description: OK
 
   /api/v1/alerts/{id}/read:
@@ -548,9 +1081,9 @@ paths:
             type: string
             format: uuid
       responses:
-        '200':
+        "200":
           description: OK
-        '404':
+        "404":
           description: Not found
 
   /api/v1/alerts/rules:
@@ -561,7 +1094,7 @@ paths:
         - ApiKeyAuth: []
           BearerAuth: []
       responses:
-        '200':
+        "200":
           description: OK
 
   /api/v1/alerts/rules/{id}:
@@ -589,7 +1122,7 @@ paths:
                 threshold:
                   type: number
       responses:
-        '200':
+        "200":
           description: OK
-        '404':
+        "404":
           description: Not found

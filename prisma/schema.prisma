@@ -1,6 +1,9 @@
-// Pulseo `public` tables — columns match prisma/migrations/*_initial/migration.sql (and legacy migrations/001).
+// Pulseo `public` tables — columns match prisma/migrations/*/migration.sql.
 // CHECK constraints and RLS policies live only in SQL migrations, not in this file.
-// FK targets in auth.users are enforced in Postgres; Profile/Organization.userId are plain UUIDs here.
+// FK targets in auth.users are enforced in Postgres; Profile/Account.userId are plain UUIDs here.
+//
+// M1 (account/brand split): the old 1:1 `Organization` (account+brand+billing) is split into
+// `Account` (one per user, owns future BYO keys) and `Brand` (many per account, owns all data).
 
 generator client {
   provider = "prisma-client-js"
@@ -21,70 +24,150 @@ model Profile {
   @@map("profiles")
 }
 
-model Organization {
-  id                   String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  userId               String   @unique @map("user_id") @db.Uuid
-  name                 String
-  brandName            String   @map("brand_name")
-  domain               String?
-  industry             String?
-  planTier             String   @default("free") @map("plan_tier")
-  enabledModels        String[] @default(["ChatGPT"]) @map("enabled_models")
-  stripeCustomerId     String?  @map("stripe_customer_id")
-  stripeSubscriptionId String?  @map("stripe_subscription_id")
-  createdAt            DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt            DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+model Account {
+  id            String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId        String   @unique @map("user_id") @db.Uuid
+  name          String
+  enabledModels String[] @default(["ChatGPT"]) @map("enabled_models")
+  createdAt     DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt     DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
 
+  brands       Brand[]
+  providerKeys ProviderKey[]
+
+  @@index([userId])
+  @@map("accounts")
+}
+
+model ProviderKey {
+  id              String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  accountId       String    @map("account_id") @db.Uuid
+  provider        String
+  ciphertext      String
+  iv              String
+  authTag         String    @map("auth_tag")
+  masked          String
+  lastValidatedAt DateTime? @map("last_validated_at") @db.Timestamptz(6)
+  createdAt       DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt       DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  account Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  @@unique([accountId, provider])
+  @@index([accountId])
+  @@map("provider_keys")
+}
+
+model Brand {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  accountId String   @map("account_id") @db.Uuid
+  name      String
+  brandName String   @map("brand_name")
+  domain    String?
+  industry  String?
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  account               Account                 @relation(fields: [accountId], references: [id], onDelete: Cascade)
   prompts               Prompt[]
   competitors           Competitor[]
+  tags                  Tag[]
+  promptSuggestions     PromptSuggestion[]
   scans                 Scan[]
   responses             Response[]
   mentions              Mention[]
   citations             Citation[]
-  visibilityDaily       VisibilityDaily[]
-  promptVisibilityDaily PromptVisibilityDaily[]
-  alertRules            AlertRule[]
-  alertHistory          AlertHistory[]
+  visibilityDaily           VisibilityDaily[]
+  competitorVisibilityDaily CompetitorVisibilityDaily[]
+  promptVisibilityDaily     PromptVisibilityDaily[]
+  alertRules                AlertRule[]
+  alertHistory              AlertHistory[]
 
-  @@map("organizations")
+  @@index([accountId])
+  @@map("brands")
 }
 
 model Prompt {
   id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  orgId       String   @map("org_id") @db.Uuid
+  brandId     String   @map("brand_id") @db.Uuid
   text        String
   country     String   @default("United States")
   countryCode String   @default("US") @map("country_code")
   language    String   @default("English")
   active      Boolean  @default(true)
+  queryType   String   @default("generic") @map("query_type")
   createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt   DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
 
-  organization          Organization            @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  brand                 Brand                   @relation(fields: [brandId], references: [id], onDelete: Cascade)
   responses             Response[]
   citations             Citation[]
   promptVisibilityDaily PromptVisibilityDaily[]
+  promptTags            PromptTag[]
 
-  @@index([orgId])
+  @@index([brandId])
   @@map("prompts")
+}
+
+model Tag {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  brandId   String   @map("brand_id") @db.Uuid
+  name      String
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  brand      Brand       @relation(fields: [brandId], references: [id], onDelete: Cascade)
+  promptTags PromptTag[]
+
+  @@unique([brandId, name])
+  @@index([brandId])
+  @@map("tags")
+}
+
+model PromptTag {
+  promptId String @map("prompt_id") @db.Uuid
+  tagId    String @map("tag_id") @db.Uuid
+
+  prompt Prompt @relation(fields: [promptId], references: [id], onDelete: Cascade)
+  tag    Tag    @relation(fields: [tagId], references: [id], onDelete: Cascade)
+
+  @@id([promptId, tagId])
+  @@index([tagId])
+  @@map("prompt_tags")
+}
+
+model PromptSuggestion {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  brandId   String   @map("brand_id") @db.Uuid
+  text      String
+  queryType String   @default("generic") @map("query_type")
+  source    String   @default("llm")
+  status    String   @default("suggested")
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  brand Brand @relation(fields: [brandId], references: [id], onDelete: Cascade)
+
+  @@unique([brandId, text])
+  @@index([brandId, status])
+  @@map("prompt_suggestions")
 }
 
 model Competitor {
   id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  orgId     String   @map("org_id") @db.Uuid
+  brandId   String   @map("brand_id") @db.Uuid
   name      String
   domain    String?
   createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
 
-  organization Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  brand           Brand                       @relation(fields: [brandId], references: [id], onDelete: Cascade)
+  visibilityDaily CompetitorVisibilityDaily[]
 
-  @@index([orgId])
+  @@index([brandId])
   @@map("competitors")
 }
 
 model Scan {
   id             String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  orgId          String    @map("org_id") @db.Uuid
+  brandId        String    @map("brand_id") @db.Uuid
   status         String    @default("pending")
   triggeredBy    String    @default("cron") @map("triggered_by")
   totalTasks     Int       @default(0) @map("total_tasks")
@@ -93,18 +176,18 @@ model Scan {
   completedAt    DateTime? @map("completed_at") @db.Timestamptz(6)
   createdAt      DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
 
-  organization    Organization      @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  brand           Brand             @relation(fields: [brandId], references: [id], onDelete: Cascade)
   responses       Response[]
   visibilityDaily VisibilityDaily[]
 
-  @@index([orgId])
+  @@index([brandId])
   @@map("scans")
 }
 
 model Response {
   id              String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   scanId          String   @map("scan_id") @db.Uuid
-  orgId           String   @map("org_id") @db.Uuid
+  brandId         String   @map("brand_id") @db.Uuid
   promptId        String   @map("prompt_id") @db.Uuid
   model           String
   status          String   @default("pending")
@@ -113,17 +196,18 @@ model Response {
   brandMentioned  Boolean  @default(false) @map("brand_mentioned")
   mentionPosition Int?     @map("mention_position")
   brandSentiment  String?  @map("brand_sentiment")
+  brandSentimentScore Int? @map("brand_sentiment_score")
   queriedAt       DateTime @default(now()) @map("queried_at") @db.Timestamptz(6)
   createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
 
-  organization Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
-  scan         Scan         @relation(fields: [scanId], references: [id], onDelete: Cascade)
-  prompt       Prompt       @relation(fields: [promptId], references: [id], onDelete: Cascade)
-  mentions     Mention[]
-  citations    Citation[]
+  brand     Brand      @relation(fields: [brandId], references: [id], onDelete: Cascade)
+  scan      Scan       @relation(fields: [scanId], references: [id], onDelete: Cascade)
+  prompt    Prompt     @relation(fields: [promptId], references: [id], onDelete: Cascade)
+  mentions  Mention[]
+  citations Citation[]
 
   @@index([scanId])
-  @@index([orgId, promptId])
+  @@index([brandId, promptId])
   @@index([model])
   @@map("responses")
 }
@@ -131,24 +215,24 @@ model Response {
 model Mention {
   id         String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   responseId String   @map("response_id") @db.Uuid
-  orgId      String   @map("org_id") @db.Uuid
+  brandId    String   @map("brand_id") @db.Uuid
   name       String
   type       String
   position   Int?
   createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
 
-  organization Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
-  response     Response     @relation(fields: [responseId], references: [id], onDelete: Cascade)
+  brand    Brand    @relation(fields: [brandId], references: [id], onDelete: Cascade)
+  response Response @relation(fields: [responseId], references: [id], onDelete: Cascade)
 
   @@index([responseId])
-  @@index([orgId])
+  @@index([brandId])
   @@map("mentions")
 }
 
 model Citation {
   id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   responseId  String   @map("response_id") @db.Uuid
-  orgId       String   @map("org_id") @db.Uuid
+  brandId     String   @map("brand_id") @db.Uuid
   promptId    String   @map("prompt_id") @db.Uuid
   url         String
   domain      String
@@ -158,38 +242,59 @@ model Citation {
   lastSeenAt  DateTime @default(now()) @map("last_seen_at") @db.Timestamptz(6)
   createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
 
-  organization Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
-  response     Response     @relation(fields: [responseId], references: [id], onDelete: Cascade)
-  prompt       Prompt       @relation(fields: [promptId], references: [id], onDelete: Cascade)
+  brand    Brand    @relation(fields: [brandId], references: [id], onDelete: Cascade)
+  response Response @relation(fields: [responseId], references: [id], onDelete: Cascade)
+  prompt   Prompt   @relation(fields: [promptId], references: [id], onDelete: Cascade)
 
-  @@index([orgId])
+  @@index([brandId])
   @@index([domain])
   @@map("citations")
 }
 
 model VisibilityDaily {
   id             String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  orgId          String   @map("org_id") @db.Uuid
+  brandId        String   @map("brand_id") @db.Uuid
   scanId         String?  @map("scan_id") @db.Uuid
   date           DateTime @db.Date
   score          Int      @default(0)
   totalResponses Int      @default(0) @map("total_responses")
   totalMentions  Int      @default(0) @map("total_mentions")
   totalCitations Int      @default(0) @map("total_citations")
+  brandSov       Int      @default(0) @map("brand_sov")
+  avgPosition    Decimal? @map("avg_position") @db.Decimal(4, 2)
+  sentimentScore Int?     @map("sentiment_score")
   modelScores    Json     @default("{}") @map("model_scores")
   createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
 
-  organization Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
-  scan         Scan?        @relation(fields: [scanId], references: [id], onDelete: SetNull)
+  brand Brand @relation(fields: [brandId], references: [id], onDelete: Cascade)
+  scan  Scan? @relation(fields: [scanId], references: [id], onDelete: SetNull)
 
-  @@unique([orgId, date])
-  @@index([orgId, date(sort: Desc)])
+  @@unique([brandId, date])
+  @@index([brandId, date(sort: Desc)])
   @@map("visibility_daily")
+}
+
+model CompetitorVisibilityDaily {
+  id           String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  brandId      String   @map("brand_id") @db.Uuid
+  competitorId String   @map("competitor_id") @db.Uuid
+  date         DateTime @db.Date
+  shareOfVoice Int      @default(0) @map("share_of_voice")
+  mentions     Int      @default(0)
+  avgPosition  Decimal? @map("avg_position") @db.Decimal(4, 2)
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  brand      Brand      @relation(fields: [brandId], references: [id], onDelete: Cascade)
+  competitor Competitor @relation(fields: [competitorId], references: [id], onDelete: Cascade)
+
+  @@unique([brandId, competitorId, date])
+  @@index([brandId, date(sort: Desc)])
+  @@map("competitor_visibility_daily")
 }
 
 model PromptVisibilityDaily {
   id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  orgId       String   @map("org_id") @db.Uuid
+  brandId     String   @map("brand_id") @db.Uuid
   promptId    String   @map("prompt_id") @db.Uuid
   date        DateTime @db.Date
   score       Int      @default(0)
@@ -199,41 +304,42 @@ model PromptVisibilityDaily {
   avgPosition Decimal? @map("avg_position") @db.Decimal(4, 2)
   createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
 
-  organization Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
-  prompt       Prompt       @relation(fields: [promptId], references: [id], onDelete: Cascade)
+  brand  Brand  @relation(fields: [brandId], references: [id], onDelete: Cascade)
+  prompt Prompt @relation(fields: [promptId], references: [id], onDelete: Cascade)
 
-  @@unique([orgId, promptId, date])
-  @@index([orgId, promptId, date(sort: Desc)])
+  @@unique([brandId, promptId, date])
+  @@index([brandId, promptId, date(sort: Desc)])
   @@map("prompt_visibility_daily")
 }
 
 model AlertRule {
   id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  orgId     String   @map("org_id") @db.Uuid
+  brandId   String   @map("brand_id") @db.Uuid
   type      String
   enabled   Boolean  @default(true)
   threshold Int?
   createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
 
-  organization Organization   @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  brand        Brand          @relation(fields: [brandId], references: [id], onDelete: Cascade)
   alertHistory AlertHistory[]
 
+  @@index([brandId])
   @@map("alert_rules")
 }
 
 model AlertHistory {
   id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  orgId     String   @map("org_id") @db.Uuid
+  brandId   String   @map("brand_id") @db.Uuid
   ruleId    String?  @map("rule_id") @db.Uuid
   type      String
   message   String
   read      Boolean  @default(false) @map("read")
   createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
 
-  organization Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
-  rule         AlertRule?   @relation(fields: [ruleId], references: [id], onDelete: SetNull)
+  brand Brand      @relation(fields: [brandId], references: [id], onDelete: Cascade)
+  rule  AlertRule? @relation(fields: [ruleId], references: [id], onDelete: SetNull)
 
-  @@index([orgId, createdAt(sort: Desc)])
+  @@index([brandId, createdAt(sort: Desc)])
   @@map("alert_history")
 }
