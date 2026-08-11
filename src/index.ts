@@ -1,4 +1,4 @@
-import "express-async-errors"; // Must be imported before express — patches async error forwarding
+import "express-async-errors";
 import express from "express";
 import cors from "cors";
 import helmet from "helmet";
@@ -36,7 +36,7 @@ import { createAlertWorker } from "./workers/alert.worker";
 import { registerDailyCron } from "./queues";
 
 const app = express();
-app.set("trust proxy", 1); // trust the first proxy so rate-limit sees real client IPs
+app.set("trust proxy", 1);
 
 const allowedOrigins = (env.FRONTEND_URL ?? "")
   .split(",")
