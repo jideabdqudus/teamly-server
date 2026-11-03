@@ -29,7 +29,7 @@ the Supabase JS client using the service-role key; Prisma owns the schema and mi
 
 ## Self-host quickstart
 
-**Prerequisites:** Docker (or Node 20 + a Redis instance) and a free
+**Prerequisites:** Docker (or Node 22.23.4 or later in the 22.x line + a Redis instance) and a free
 [Supabase](https://supabase.com) project.
 
 1. **Clone and configure.**
@@ -68,12 +68,25 @@ the Supabase JS client using the service-role key; Prisma owns the schema and mi
 ### Running without Docker
 
 ```bash
+nvm install
+nvm use
 npm install
 npm run db:deploy
 npm run dev
 ```
 
 You'll need a Redis reachable at `REDIS_URL` (defaults to `redis://localhost:6379`).
+The `nvm` commands use the version pinned in `.nvmrc`; other version managers can
+use `.node-version`.
+
+### Deploying the runtime security update on Render
+
+For Docker services, deploy this Dockerfile with a fresh build (clear the build
+cache) to refresh Node.js and the Alpine CA certificates in both stages.
+For native Node services, Render reads `.node-version`; if `NODE_VERSION` is set
+in the dashboard, update it to `22.23.4` because it takes precedence.
+Rebuild and redeploy every affected web service, worker, and cron job, then confirm
+`node --version` in the deployed service reports `v22.23.4` or a later 22.x patch.
 
 ## Bring your own keys (BYOK)
 

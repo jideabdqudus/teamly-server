@@ -1,11 +1,11 @@
 # syntax=docker/dockerfile:1
 
 # ---- builder: install everything, generate Prisma client, compile TS ----
-FROM node:20-alpine AS builder
+FROM node:22.23.4-alpine AS builder
 WORKDIR /app
 
 # Prisma's query engine needs openssl on Alpine (musl).
-RUN apk add --no-cache openssl
+RUN apk add --no-cache --upgrade openssl ca-certificates && update-ca-certificates
 
 COPY package*.json ./
 RUN npm ci
@@ -19,11 +19,11 @@ COPY src ./src
 RUN npm run build
 
 # ---- runtime: prod deps only + compiled output ----
-FROM node:20-alpine AS runtime
+FROM node:22.23.4-alpine AS runtime
 WORKDIR /app
 ENV NODE_ENV=production
 
-RUN apk add --no-cache openssl
+RUN apk add --no-cache --upgrade openssl ca-certificates && update-ca-certificates
 
 COPY package*.json ./
 RUN npm ci --omit=dev

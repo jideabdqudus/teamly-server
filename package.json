@@ -3,6 +3,9 @@
   "version": "1.0.0",
   "description": "Teamly backend — LLM brand visibility monitoring API",
   "main": "dist/index.js",
+  "engines": {
+    "node": ">=22.23.4 <23"
+  },
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "build": "prisma generate && tsc && mkdir -p dist/openapi && cp openapi/openapi.yaml dist/openapi/openapi.yaml",
